@@ -1,0 +1,490 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS Security Command Center - ML-Powered Security Monitoring System'
+
+Parameters:
+  NotificationEmail:
+    Type: String
+    Description: Email address for receiving security alerts
+    Default: your-email@example.com
+
+Resources:
+  # S3 Bucket for storing security scan results
+  SecurityDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub security-command-center-${AWS::AccountId}
+      AccessControl: Private
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldScans
+            Status: Enabled
+            ExpirationInDays: 90
+            Prefix: security-scans/
+          - Id: DeleteOldMLResults
+            Status: Enabled
+            ExpirationInDays: 30
+            Prefix: ml-results/
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  # SNS Topic for security alerts
+  SecurityAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: security-alerts
+      DisplayName: Security Command Center Alerts
+
+  # SNS Subscription for email notifications
+  SecurityAlertsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref SecurityAlertsTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  # IAM Role for Lambda Functions
+  SecurityLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: SecurityCommandCenter-Role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SecurityMonitoringAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # EC2 Permissions
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeNetworkAcls
+                Resource: '*'
+              # S3 Permissions
+              - Effect: Allow
+                Action:
+                  - s3:ListAllMyBuckets
+                  - s3:GetBucketAcl
+                  - s3:GetBucketLocation
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: 
+                  - !Sub arn:aws:s3:::security-command-center-${AWS::AccountId}
+                  - !Sub arn:aws:s3:::security-command-center-${AWS::AccountId}/*
+              # IAM Permissions
+              - Effect: Allow
+                Action:
+                  - iam:ListUsers
+                  - iam:ListMFADevices
+                  - iam:ListAccessKeys
+                  - iam:ListUserPolicies
+                  - iam:ListAttachedUserPolicies
+                Resource: '*'
+              # CloudWatch Permissions
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: SecurityCommandCenter
+              # SNS Permissions
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref SecurityAlertsTopic
+
+  # Security Data Collector Lambda Function
+  SecurityDataCollector:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: SecurityDataCollector
+      Description: 'Collects security data from EC2, S3, and IAM services'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt SecurityLambdaRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          from datetime import datetime
+
+          def lambda_handler(event, context):
+              print("🚀 Starting Security Data Collection")
+              
+              try:
+                  ec2 = boto3.client('ec2')
+                  s3 = boto3.client('s3')
+                  iam = boto3.client('iam')
+                  
+                  security_data = {
+                      'timestamp': datetime.utcnow().isoformat(),
+                      'ec2_findings': [],
+                      's3_findings': [],
+                      'iam_findings': []
+                  }
+                  
+                  # EC2 Security Scan
+                  try:
+                      instances = ec2.describe_instances()
+                      for reservation in instances['Reservations']:
+                          for instance in reservation['Instances']:
+                              if instance.get('PublicIpAddress'):
+                                  security_data['ec2_findings'].append({
+                                      'instance_id': instance['InstanceId'],
+                                      'public_ip': instance['PublicIpAddress'],
+                                      'risk': 'MEDIUM',
+                                      'type': 'PUBLIC_INSTANCE'
+                                  })
+                  except Exception as e:
+                      print(f"EC2 Error: {e}")
+                  
+                  # S3 Security Scan
+                  try:
+                      buckets = s3.list_buckets()
+                      for bucket in buckets['Buckets'][:10]:
+                          try:
+                              acl = s3.get_bucket_acl(Bucket=bucket['Name'])
+                              for grant in acl['Grants']:
+                                  if 'URI' in grant.get('Grantee', {}) and 'AllUsers' in grant['Grantee']['URI']:
+                                      security_data['s3_findings'].append({
+                                          'bucket_name': bucket['Name'],
+                                          'risk': 'HIGH',
+                                          'type': 'PUBLIC_BUCKET'
+                                      })
+                                      break
+                          except:
+                              continue
+                  except Exception as e:
+                      print(f"S3 Error: {e}")
+                  
+                  # IAM Security Scan
+                  try:
+                      users = iam.list_users()
+                      for user in users['Users']:
+                          mfa_devices = iam.list_mfa_devices(UserName=user['UserName'])
+                          if not mfa_devices['MFADevices']:
+                              security_data['iam_findings'].append({
+                                  'user_name': user['UserName'],
+                                  'risk': 'HIGH',
+                                  'type': 'NO_MFA'
+                              })
+                  except Exception as e:
+                      print(f"IAM Error: {e}")
+                  
+                  # Save to S3
+                  try:
+                      s3.put_object(
+                          Bucket='security-command-center-' + boto3.client('sts').get_caller_identity()['Account'],
+                          Key=f"security-scans/{datetime.utcnow().strftime('%Y/%m/%d/%H-%M-scan.json')}",
+                          Body=json.dumps(security_data, indent=2)
+                      )
+                      print("✅ Results saved to S3")
+                  except Exception as e:
+                      print(f"S3 Save Error: {e}")
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'message': 'Security scan completed',
+                          'ec2_issues': len(security_data['ec2_findings']),
+                          's3_issues': len(security_data['s3_findings']),
+                          'iam_issues': len(security_data['iam_findings'])
+                      })
+                  }
+                  
+              except Exception as e:
+                  print(f"❌ Scan failed: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({'error': str(e)})
+                  }
+      Timeout: 300
+      MemorySize: 256
+      Environment:
+        Variables:
+          S3_BUCKET_NAME: !Ref SecurityDataBucket
+
+  # ML Security Analyzer Lambda Function
+  MLSecurityAnalyzer:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: MLSecurityAnalyzer
+      Description: 'ML-powered security analysis and alerting'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt SecurityLambdaRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          from datetime import datetime
+
+          def lambda_handler(event, context):
+              print("🤖 Starting ML Security Analysis")
+              
+              try:
+                  cloudwatch = boto3.client('cloudwatch')
+                  sns = boto3.client('sns')
+                  
+                  # Run security audit
+                  security_scores = run_security_audit()
+                  
+                  # Send metrics to CloudWatch
+                  send_security_metrics(cloudwatch, security_scores)
+                  
+                  # Send email alert
+                  send_security_email(sns, security_scores)
+                  
+                  print(f"✅ ML analysis complete. Score: {security_scores['security_health']}/100")
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'message': 'ML security analysis completed',
+                          'security_score': security_scores['security_health'],
+                          'active_threats': security_scores['active_threats']
+                      })
+                  }
+                  
+              except Exception as e:
+                  print(f"❌ ML analysis failed: {str(e)}")
+                  return {'statusCode': 500, 'body': json.dumps({'error': str(e)})}
+
+          def run_security_audit():
+              ec2 = boto3.client('ec2')
+              s3 = boto3.client('s3')
+              iam = boto3.client('iam')
+              
+              scores = {
+                  'security_health': 100,
+                  'active_threats': 0,
+                  'ec2_score': 100,
+                  's3_score': 100,
+                  'iam_score': 100,
+                  'scan_time': datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
+              }
+              
+              # EC2 Check
+              try:
+                  instances = ec2.describe_instances()
+                  public_instances = sum(1 for reservation in instances['Reservations'] 
+                                       for instance in reservation['Instances'] 
+                                       if instance.get('PublicIpAddress'))
+                  if public_instances > 0:
+                      scores['ec2_score'] = max(60, 100 - (public_instances * 10))
+                      scores['active_threats'] += public_instances
+                      scores['security_health'] -= (public_instances * 5)
+              except Exception as e:
+                  scores['ec2_score'] = 50
+              
+              # S3 Check
+              try:
+                  buckets = s3.list_buckets()
+                  public_buckets = 0
+                  for bucket in buckets['Buckets'][:10]:
+                      try:
+                          acl = s3.get_bucket_acl(Bucket=bucket['Name'])
+                          if any('AllUsers' in grant.get('Grantee', {}).get('URI', '') 
+                               for grant in acl['Grants'] if 'URI' in grant.get('Grantee', {})):
+                              public_buckets += 1
+                      except:
+                          continue
+                  if public_buckets > 0:
+                      scores['s3_score'] = max(50, 100 - (public_buckets * 20))
+                      scores['active_threats'] += public_buckets
+                      scores['security_health'] -= (public_buckets * 10)
+              except Exception as e:
+                  scores['s3_score'] = 50
+              
+              # IAM Check
+              try:
+                  users = iam.list_users()
+                  users_without_mfa = sum(1 for user in users['Users'] 
+                                        if not iam.list_mfa_devices(UserName=user['UserName'])['MFADevices'])
+                  if users_without_mfa > 0:
+                      scores['iam_score'] = max(40, 100 - (users_without_mfa * 30))
+                      scores['active_threats'] += users_without_mfa
+                      scores['security_health'] -= (users_without_mfa * 15)
+              except Exception as e:
+                  scores['iam_score'] = 50
+              
+              scores['security_health'] = max(0, min(100, scores['security_health']))
+              return scores
+
+          def send_security_metrics(cloudwatch, scores):
+              try:
+                  cloudwatch.put_metric_data(
+                      Namespace='SecurityCommandCenter',
+                      MetricData=[
+                          {'MetricName': 'SecurityHealthScore', 'Value': scores['security_health'], 'Unit': 'Count'},
+                          {'MetricName': 'ActiveThreats', 'Value': scores['active_threats'], 'Unit': 'Count'},
+                          {'MetricName': 'EC2SecurityScore', 'Value': scores['ec2_score'], 'Unit': 'Count'},
+                          {'MetricName': 'S3SecurityScore', 'Value': scores['s3_score'], 'Unit': 'Count'},
+                          {'MetricName': 'IAMSecurityScore', 'Value': scores['iam_score'], 'Unit': 'Count'}
+                      ]
+                  )
+                  print("📊 Metrics sent to CloudWatch")
+              except Exception as e:
+                  print(f"Metrics error: {e}")
+
+          def send_security_email(sns, scores):
+              try:
+                  topic_arn = 'arn:aws:sns:ap-south-1:641550531422:security-alerts'
+                  
+                  message = f"""
+          🚨 AWS SECURITY COMMAND CENTER - SCAN REPORT
+
+          Scan Time: {scores['scan_time']}
+
+          📊 SECURITY OVERVIEW:
+          • Overall Score: {scores['security_health']}/100
+          • Active Threats: {scores['active_threats']}
+          • EC2 Security: {scores['ec2_score']}/100
+          • S3 Security: {scores['s3_score']}/100
+          • IAM Security: {scores['iam_score']}/100
+
+          This is an automated security scan from your AWS Security Command Center.
+          """
+                  
+                  sns.publish(
+                      TopicArn=topic_arn,
+                      Message=message,
+                      Subject=f'Security Alert: Score {scores["security_health"]}/100 - {scores["active_threats"]} Threats'
+                  )
+                  print("📧 Security alert sent")
+              except Exception as e:
+                  print(f"Email error: {e}")
+      Timeout: 300
+      MemorySize: 512
+
+  # CloudWatch Event Rules for Scheduling
+
+  # Hourly security scans
+  SecurityScanSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "Trigger hourly security scans"
+      ScheduleExpression: "rate(1 hour)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt SecurityDataCollector.Arn
+          Id: SecurityDataCollectorTarget
+
+  # Daily ML analysis
+  MLAnalysisSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "Trigger daily ML security analysis"
+      ScheduleExpression: "rate(1 day)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt MLSecurityAnalyzer.Arn
+          Id: MLSecurityAnalyzerTarget
+
+  # Lambda Permissions for CloudWatch Events
+
+  SecurityDataCollectorPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SecurityDataCollector
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt SecurityScanSchedule.Arn
+
+  MLSecurityAnalyzerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MLSecurityAnalyzer
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt MLAnalysisSchedule.Arn
+
+  # CloudWatch Dashboard
+  SecurityDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: SecurityCommandCenter
+      DashboardBody: |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "SecurityCommandCenter", "SecurityHealthScore" ]
+                ],
+                "period": 300,
+                "stat": "Maximum",
+                "region": "ap-south-1",
+                "title": "Security Health Score",
+                "annotations": {
+                  "horizontal": [
+                    {
+                      "value": 80,
+                      "label": "Good"
+                    },
+                    {
+                      "value": 60,
+                      "label": "Warning"
+                    }
+                  ]
+                },
+                "yAxis": {
+                  "left": {
+                    "min": 0,
+                    "max": 100
+                  }
+                }
+              }
+            }
+          ]
+        }
+
+Outputs:
+  SecurityDashboardURL:
+    Description: "CloudWatch Dashboard URL for security monitoring"
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=SecurityCommandCenter"
+
+  S3BucketName:
+    Description: "S3 Bucket name for security data storage"
+    Value: !Ref SecurityDataBucket
+
+  SNSTopicARN:
+    Description: "SNS Topic ARN for security alerts"
+    Value: !Ref SecurityAlertsTopic
+
+  SecurityDataCollectorARN:
+    Description: "Security Data Collector Lambda ARN"
+    Value: !GetAtt SecurityDataCollector.Arn
+
+  MLSecurityAnalyzerARN:
+    Description: "ML Security Analyzer Lambda ARN"
+    Value: !GetAtt MLSecurityAnalyzer.Arn
+
+  DeploymentInstructions:
+    Description: "Next steps after deployment"
+    Value: !Sub |
+      Deployment successful! Next steps:
+      1. Check your email (${NotificationEmail}) and confirm SNS subscription
+      2. Wait for automatic scans to begin (1 hour for basic scans, 1 day for ML analysis)
+      3. Visit the CloudWatch Dashboard: https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=SecurityCommandCenter
+      4. Manual test: Run Lambda functions to generate initial data
