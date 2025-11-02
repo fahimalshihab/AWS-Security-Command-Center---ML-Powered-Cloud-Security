@@ -23,6 +23,9 @@ Traditional cloud security tools work in isolation, creating blind spots. Our sy
 ## 🛡️ Security Capabilities
 
 ### **Multi-Service Protection**
+
+<img width="952" height="466" alt="image" src="https://github.com/user-attachments/assets/e441ea05-742f-409d-9efd-2bd3ccbb8527" />
+
 ```
 🚨 THREAT DETECTION MATRIX:
 
