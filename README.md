@@ -48,6 +48,9 @@ IAM SECURITY:
 • Unusual login patterns
 ```
 
+<img width="659" height="590" alt="image" src="https://github.com/user-attachments/assets/256b4c7a-7750-4dd3-a300-573a3f83ef66" />
+
+
 ### **ML-Powered Intelligence**
 - **Behavioral Biometrics**: Learns each service's normal usage patterns
 - **Anomaly Scoring**: Calculates threat probability using ensemble methods
