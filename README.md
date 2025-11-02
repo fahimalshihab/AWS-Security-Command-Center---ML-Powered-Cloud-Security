@@ -59,21 +59,8 @@ IAM SECURITY:
 
 ## 🏗️ Technical Architecture
 
-### **Core Components**
-```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│  SECURITY DATA  │    │   ML ANALYTICS  │    │  THREAT RESPONSE│
-│   COLLECTION    │───▶│    ENGINE       │───▶│     LAYER       │
-│                 │    │                 │    │                 │
-│ • EC2 Scanning  │    │ • Anomaly       │    │ • Email Alerts  │
-│ • S3 Auditing   │    │   Detection     │    │ • Dashboard     │
-│ • IAM Analysis  │    │ • Risk Scoring  │    │ • S3 Reports    │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-         │                       │                       │
-         ▼                       ▼                       ▼
-   AWS CloudTrail          Machine Learning        Real-time Actions
-   API Monitoring          Behavioral Models       Automated Responses
-```
+<img width="1190" height="450" alt="p2 drawio" src="https://github.com/user-attachments/assets/90b005b3-3ad4-4416-bcf4-ab19f2552f6e" />
+
 
 ## 🔍 Advanced Security Features
 
